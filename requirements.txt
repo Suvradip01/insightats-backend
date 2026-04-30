@@ -1,0 +1,19 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.0
+transformers==4.46.3
+safetensors==0.4.5
+numpy==1.26.4
+pdfplumber==0.11.4
+python-docx==1.1.2
+pydantic==2.10.3
+python-multipart==0.0.12
+sentencepiece==0.2.0
+protobuf==5.28.3
+
+# CPU-only PyTorch — saves ~700 MB vs CUDA build. Oracle Always Free has no GPU.
+# On local Windows with CUDA, keep your existing torch install — don't pip install from here.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
+
+# Optional explainability (very slow ~60s/req); enable via ENABLE_SHAP=1
+# shap
