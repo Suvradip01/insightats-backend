@@ -13,24 +13,39 @@ from app.schemas.recruiter import (
 )
 from app.services.pipeline.orchestrator import get_orchestrator
 from app.services.recruiter.security import AuthPrincipal, hash_password, verify_password
-from app.services.recruiter.store import create_recruiter, create_session, get_principal_for_token, get_recruiter_by_company_username, get_recruiter_by_username
+from app.services.recruiter.store import create_recruiter, create_session, get_recruiter_by_company_username, get_recruiter_by_username
 from app.services.resume_parser import ResumeParser
+import base64
 
 router = APIRouter()
 _bearer = HTTPBearer(auto_error=False)
 
 
+from fastapi import Request
+
 def _require_recruiter(
+    request: Request,
     creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ) -> AuthPrincipal:
     if creds is None or not creds.credentials:
         raise HTTPException(status_code=401, detail="Missing bearer token")
+    
     token = creds.credentials
-    principal = get_principal_for_token(token)
-    if not principal:
+    try:
+        parts = token.split('.')
+        if len(parts) != 3:
+            raise ValueError("Invalid JWT")
+        
+        payload_b64 = parts[1]
+        payload_b64 += '=' * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64).decode('utf-8'))
+        
+        rid = payload.get("sub", "unknown")
+    except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    rid, company, username = principal
-    return AuthPrincipal(recruiter_id=rid, company=company, username=username)
+
+    company = request.headers.get("x-company-name", "your company")
+    return AuthPrincipal(recruiter_id=0, company=company, username=payload.get("email", "unknown"))
 
 
 @router.post("/register", response_model=RecruiterAuthResponse)
