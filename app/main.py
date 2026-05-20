@@ -4,6 +4,7 @@ from app.core.config import settings
 from app.api.endpoints import resume
 from app.api.endpoints import recruiter
 
+#Creates the backend application instance.
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,

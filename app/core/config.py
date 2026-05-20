@@ -24,11 +24,11 @@ class Settings:
     API_V1_STR: str = "/api/v1"
 
     # Lightweight local storage (recruiter accounts + sessions)
-    # On Oracle Cloud: set DB_PATH=/data/db.sqlite3 (persistent block volume)
+    # set DB_PATH=/data/db.sqlite3 (persistent block volume)
     DB_PATH: str = os.environ.get("DB_PATH", os.path.join(_BASE, "db.sqlite3"))
 
     # Fine-tuned weights (see backend/models/)
-    # On Oracle Cloud: set MODEL_DIR=/data/models  (persistent block volume)
+    # set MODEL_DIR=/data/models  (persistent block volume)
     _model_base: str = os.environ.get("MODEL_DIR", os.path.join(_BASE, "models"))
     NER_MODEL_DIR: str        = os.path.join(os.environ.get("MODEL_DIR", os.path.join(_BASE, "models")), "ner_model")
     MATCHER_MODEL_DIR: str    = os.path.join(os.environ.get("MODEL_DIR", os.path.join(_BASE, "models")), "matcher_model")
@@ -49,6 +49,15 @@ class Settings:
             "http://127.0.0.1:5173",
         ],
     )
+
+    # Clerk — required for POST /api/v1/recruiter/batch-analyze (frontend getToken() JWTs)
+    # Clerk Dashboard → Configure → API Keys → JWT issuer
+    CLERK_ISSUER: str = os.environ.get("CLERK_ISSUER", "").rstrip("/")
+    CLERK_JWKS_URL: str = os.environ.get(
+        "CLERK_JWKS_URL",
+        f"{CLERK_ISSUER}/.well-known/jwks.json" if CLERK_ISSUER else "",
+    )
+    CLERK_AUDIENCE: str = os.environ.get("CLERK_AUDIENCE", "").strip()
 
 
 settings = Settings()

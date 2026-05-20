@@ -8,7 +8,7 @@ import secrets
 from dataclasses import dataclass
 
 
-_PBKDF2_ITERS = 210_000
+_PBKDF2_ITERS = 210_000 # repeatedly hashes password many times.
 _SALT_BYTES = 16
 
 
@@ -35,20 +35,20 @@ def verify_password(password: str, stored: str) -> bool:
         salt = base64.urlsafe_b64decode(_pad_b64(salt_b64))
         expected = base64.urlsafe_b64decode(_pad_b64(hash_b64))
         dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iters)
-        return hmac.compare_digest(dk, expected)
+        return hmac.compare_digest(dk, expected) # hmac Secure Comparison instead of == to prevent timing attacks.
     except Exception:
         return False
 
 
-def _pad_b64(s: str) -> str:
+def _pad_b64(s: str) -> str: # Restores required padding for base64 decoding.
     return s + "=" * (-len(s) % 4)
 
 
-def new_token() -> str:
+def new_token() -> str: # Creates secure session token.
     return secrets.token_urlsafe(32)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True) # Immutable data class representing authenticated user info. frozen=True Makes object immutable.
 class AuthPrincipal:
     recruiter_id: int
     company: str

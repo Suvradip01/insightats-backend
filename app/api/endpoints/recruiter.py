@@ -1,7 +1,6 @@
-import json
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.schemas.batch import BatchAnalyzeResponse, RankedResumeResult
@@ -12,16 +11,43 @@ from app.schemas.recruiter import (
     RecruiterRegisterRequest,
 )
 from app.services.pipeline.orchestrator import get_orchestrator
+from app.services.recruiter.clerk_jwt import _looks_like_jwt, verify_clerk_jwt
 from app.services.recruiter.security import AuthPrincipal, hash_password, verify_password
-from app.services.recruiter.store import create_recruiter, create_session, get_recruiter_by_company_username, get_recruiter_by_username
+from app.services.recruiter.store import (
+    create_recruiter,
+    create_session,
+    get_principal_for_token,
+    get_recruiter_by_company_username,
+    get_recruiter_by_username,
+)
 from app.services.resume_parser import ResumeParser
-import base64
 
 router = APIRouter()
 _bearer = HTTPBearer(auto_error=False)
 
 
-from fastapi import Request
+def _principal_from_clerk_payload(payload: dict, request: Request) -> AuthPrincipal:
+    sub = payload.get("sub")
+    if not sub:
+        raise HTTPException(status_code=401, detail="Invalid token: missing subject")
+
+    email = (
+        payload.get("email")
+        or payload.get("primary_email")
+        or payload.get("username")
+        or str(sub)
+    )
+    company = request.headers.get("x-company-name") or "your company"
+    return AuthPrincipal(recruiter_id=0, company=company, username=str(email))
+
+
+def _principal_from_session_token(token: str) -> AuthPrincipal:
+    row = get_principal_for_token(token)
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
+    rid, company, username = row
+    return AuthPrincipal(recruiter_id=rid, company=company, username=username)
+
 
 def _require_recruiter(
     request: Request,
@@ -29,23 +55,19 @@ def _require_recruiter(
 ) -> AuthPrincipal:
     if creds is None or not creds.credentials:
         raise HTTPException(status_code=401, detail="Missing bearer token")
-    
-    token = creds.credentials
-    try:
-        parts = token.split('.')
-        if len(parts) != 3:
-            raise ValueError("Invalid JWT")
-        
-        payload_b64 = parts[1]
-        payload_b64 += '=' * (-len(payload_b64) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(payload_b64).decode('utf-8'))
-        
-        rid = payload.get("sub", "unknown")
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    company = request.headers.get("x-company-name", "your company")
-    return AuthPrincipal(recruiter_id=0, company=company, username=payload.get("email", "unknown"))
+    token = creds.credentials.strip()
+
+    if _looks_like_jwt(token):
+        try:
+            payload = verify_clerk_jwt(token)
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=401, detail=str(e)) from e
+        return _principal_from_clerk_payload(payload, request)
+
+    return _principal_from_session_token(token)
 
 
 @router.post("/register", response_model=RecruiterAuthResponse)
@@ -74,7 +96,6 @@ def login_recruiter(payload: RecruiterLoginRequest) -> RecruiterAuthResponse:
 
 
 def _ranking_reason(analysis) -> str:
-    # Use the most explainable signals already computed.
     miss = len(getattr(analysis, "missing_skills", []) or [])
     fit = getattr(getattr(analysis, "fit_result", None), "verdict", "") or ""
     return (
@@ -110,7 +131,6 @@ async def batch_analyze(
             analysis = orch.analyze(text, job)
             analyzed.append((filename, analysis))
         except ValueError as ve:
-            # Keep failed file in results with score 0 + message so recruiters can spot issues.
             from app.schemas.analyze import AnalyzeResponse
 
             analyzed.append(

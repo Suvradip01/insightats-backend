@@ -18,6 +18,7 @@ class NerEntities(BaseModel):
     college_name: str = ""
     companies: List[str] = Field(default_factory=list)
     location: str = ""
+    #regex based extraction from Resume
     yoe: Optional[str] = None
     grad_year: Optional[str] = None
 

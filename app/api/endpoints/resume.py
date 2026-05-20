@@ -24,7 +24,7 @@ async def analyze_resume(
         content = await resume_file.read()
         filename = resume_file.filename or "resume.bin"
 
-        text = ResumeParser.extract_text(content, filename)
+        text = ResumeParser.extract_text(content, filename) #resume parsing
 
         try:
             job_dict = json.loads(job_description)
@@ -34,7 +34,7 @@ async def analyze_resume(
 
         result = get_orchestrator().analyze(text, job)
 
-        if result.status == "pending_setup":
+        if result.status == "pending_setup": #if models not ready, return pending status with message
             return result
 
         return result

@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.schemas.analyze import AnalyzeResponse
 
-
+# ranking resumes wiht score and clear explanation
 class RankedResumeResult(BaseModel):
     filename: str
     rank: int = Field(..., ge=1)
@@ -14,7 +14,7 @@ class RankedResumeResult(BaseModel):
     ranking_reason: str = ""
     analysis: AnalyzeResponse
 
-
+# response for batch analyze method , total resume count and ranked results with analysis
 class BatchAnalyzeResponse(BaseModel):
     status: str = "success"
     message: Optional[str] = None

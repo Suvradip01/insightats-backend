@@ -11,7 +11,39 @@ from app.services.recruiter.security import new_token
 def _connect() -> sqlite3.Connection:
     con = sqlite3.connect(settings.DB_PATH, check_same_thread=False)
     con.row_factory = sqlite3.Row
+    # SQLite disables FK enforcement by default; required for ON DELETE CASCADE.
+    con.execute("PRAGMA foreign_keys = ON")
     return con
+
+
+# Secondary indexes for lookups beyond PRIMARY KEY / UNIQUE constraints.
+# UNIQUE(company, username) already indexes (company, username) pairs.
+_RECRUITER_INDEXES = (
+    (
+        "idx_recruiters_username",
+        "CREATE INDEX IF NOT EXISTS idx_recruiters_username ON recruiters(username)",
+    ),
+    (
+        "idx_recruiters_created_at",
+        "CREATE INDEX IF NOT EXISTS idx_recruiters_created_at ON recruiters(created_at)",
+    ),
+    (
+        "idx_recruiter_sessions_recruiter_id",
+        "CREATE INDEX IF NOT EXISTS idx_recruiter_sessions_recruiter_id "
+        "ON recruiter_sessions(recruiter_id)",
+    ),
+    (
+        "idx_recruiter_sessions_expires_at",
+        "CREATE INDEX IF NOT EXISTS idx_recruiter_sessions_expires_at "
+        "ON recruiter_sessions(expires_at)",
+    ),
+)
+
+
+def _ensure_indexes(con: sqlite3.Connection) -> None:
+    """Idempotent — safe on every ensure_db() call and for existing DB files."""
+    for _name, ddl in _RECRUITER_INDEXES:
+        con.execute(ddl)
 
 
 def ensure_db() -> None:
@@ -40,6 +72,7 @@ def ensure_db() -> None:
             )
             """
         )
+        _ensure_indexes(con)
         con.commit()
     finally:
         con.close()
