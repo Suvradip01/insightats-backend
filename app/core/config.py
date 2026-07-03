@@ -24,11 +24,11 @@ class Settings:
     API_V1_STR: str = "/api/v1"
 
     # Lightweight local storage (recruiter accounts + sessions)
-    # set DB_PATH=/data/db.sqlite3 (persistent block volume)
+    # On Oracle Cloud: set DB_PATH=/data/db.sqlite3 (persistent block volume)
     DB_PATH: str = os.environ.get("DB_PATH", os.path.join(_BASE, "db.sqlite3"))
 
     # Fine-tuned weights (see backend/models/)
-    # set MODEL_DIR=/data/models  (persistent block volume)
+    # On Oracle Cloud: set MODEL_DIR=/data/models  (persistent block volume)
     _model_base: str = os.environ.get("MODEL_DIR", os.path.join(_BASE, "models"))
     NER_MODEL_DIR: str        = os.path.join(os.environ.get("MODEL_DIR", os.path.join(_BASE, "models")), "ner_model")
     MATCHER_MODEL_DIR: str    = os.path.join(os.environ.get("MODEL_DIR", os.path.join(_BASE, "models")), "matcher_model")
@@ -51,13 +51,20 @@ class Settings:
     )
 
     # Clerk — required for POST /api/v1/recruiter/batch-analyze (frontend getToken() JWTs)
-    # Clerk Dashboard → Configure → API Keys → JWT issuer
+    # Issuer URL from Clerk Dashboard → API Keys → Advanced → JWT issuer
     CLERK_ISSUER: str = os.environ.get("CLERK_ISSUER", "").rstrip("/")
     CLERK_JWKS_URL: str = os.environ.get(
         "CLERK_JWKS_URL",
         f"{CLERK_ISSUER}/.well-known/jwks.json" if CLERK_ISSUER else "",
     )
+    # Optional: Clerk "Authorized parties" / azp — leave empty for default session tokens
     CLERK_AUDIENCE: str = os.environ.get("CLERK_AUDIENCE", "").strip()
+
+    # Redis caching — set REDIS_URL to enable result caching (e.g. redis://localhost:6379/0)
+    # Leave empty to disable Redis and run without caching (graceful degradation).
+    REDIS_URL: str = os.environ.get("REDIS_URL", "").strip()
+    # How long to keep a cached analysis result (seconds). Default: 1 hour.
+    CACHE_TTL: int = int(os.environ.get("CACHE_TTL", "3600"))
 
 
 settings = Settings()

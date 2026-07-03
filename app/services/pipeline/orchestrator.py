@@ -1,8 +1,26 @@
-"""End-to-end InSightATS pipeline: M1 → M2 → M3 → derived scores → feedback."""
+"""End-to-end InSightATS pipeline: M1 → M2 → M3 → derived scores → feedback.
+
+Result caching
+--------------
+When REDIS_URL is configured, every successful analysis is stored under a
+deterministic key: sha256(resume_text + "::" + jd_text).
+
+Cache hits skip the entire 3-model pipeline and return in <5 ms instead of
+the usual 5–30 s. Cache misses are fully transparent to callers.
+
+The cache path is intentionally in the *async* resume endpoint layer so that
+the synchronous `analyze()` method stays clean and testable.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+from typing import Optional
+
 from app.core.config import settings
+from app.core.redis_client import cache_get, cache_set
 from app.schemas.analyze import AnalyzeResponse, BreakdownProbs, FitResult, SkillSignals
 from app.schemas.job import JobDescription
 from app.services.feedback.builder import build_feedback_lines
@@ -23,6 +41,19 @@ from app.services.scoring.derive_scores import (
     structure_score_from_entities,
 )
 
+logger = logging.getLogger(__name__)
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _make_cache_key(resume_text: str, jd_text: str) -> str:
+    """Deterministic SHA-256 key for a (resume, JD) pair."""
+    digest = hashlib.sha256(
+        f"{resume_text}::{jd_text}".encode("utf-8", errors="replace")
+    ).hexdigest()
+    return f"insightats:analysis:{digest}"
+
 
 def _composite_headline_score(
     fit_score_0_1: float,
@@ -33,9 +64,10 @@ def _composite_headline_score(
 ) -> int:
     """
     Blend M2 semantic match with the four radar dimensions.
-    
-    Using only fit_score × 100 for the donut often under-reports strong JD/CV overlap when the
-    classifier still favors "Partial Fit" — the radar then looks good while the headline stays ~60s.
+
+    Using only fit_score × 100 for the donut often under-reports strong
+    JD/CV overlap when the classifier still favours "Partial Fit" — the
+    radar then looks good while the headline stays ~60s.
     """
     m2 = fit_score_0_1 * 100.0
     dim = (
@@ -44,7 +76,7 @@ def _composite_headline_score(
         + 0.25 * project_score
         + 0.15 * structure_score
     )
-    # The user's M2 semantic ML model dictates 42% of the total score directly
+    # M2 semantic model dictates 42 % of the total score directly.
     blended = 0.42 * m2 + 0.58 * dim
     return int(round(max(0.0, min(100.0, blended))))
 
@@ -69,13 +101,26 @@ def _synthetic_fit(skill_signals: SkillSignals, jd_skill_count: int) -> FitResul
     )
 
 
+# ── Core orchestrator ─────────────────────────────────────────────────────────
+
+
 class InsightOrchestrator:
     def __init__(self) -> None:
         self.ner = NerRunner()
         self.matcher = MatcherRunner()
         self.complexity = ComplexityRunner()
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def analyze(self, resume_text: str, job: JobDescription) -> AnalyzeResponse:
+        """
+        Run the full ML pipeline synchronously.
+
+        Callers who want Redis caching should use ``analyze_cached()``
+        (async) instead — this method is kept sync for direct tests.
+        """
         jd_text = job.description or ""
 
         if not self.ner.loaded and not self.matcher.loaded:
@@ -179,6 +224,54 @@ class InsightOrchestrator:
             shap_feedback=shap_msg,
             raw_shap_data=raw_shap,
         )
+
+    # ------------------------------------------------------------------
+    # Async cache-aware entry point (used by the HTTP endpoint)
+    # ------------------------------------------------------------------
+
+    async def analyze_cached(
+        self,
+        resume_text: str,
+        job: JobDescription,
+    ) -> AnalyzeResponse:
+        """
+        Analyze with Redis result caching.
+
+        Flow:
+        1. Build a deterministic cache key from (resume_text, jd_text).
+        2. Check Redis — on hit, deserialise and return immediately.
+        3. On miss, run the sync pipeline, serialise to JSON, store in Redis.
+        4. If Redis is unavailable at any step, fall through transparently.
+        """
+        jd_text = job.description or ""
+        cache_key = _make_cache_key(resume_text, jd_text)
+
+        # --- Cache read -------------------------------------------------
+        cached_json: Optional[str] = await cache_get(cache_key)
+        if cached_json is not None:
+            try:
+                logger.debug("Cache HIT: %s", cache_key)
+                return AnalyzeResponse.model_validate_json(cached_json)
+            except Exception as exc:  # noqa: BLE001
+                # Corrupted entry — log and fall through to recompute.
+                logger.warning("Cache deserialise error (%s): %s", cache_key, exc)
+
+        # --- ML pipeline ------------------------------------------------
+        logger.debug("Cache MISS: %s — running pipeline", cache_key)
+        result = self.analyze(resume_text, job)
+
+        # --- Cache write (only successful analyses) ----------------------
+        if result.status == "success":
+            try:
+                serialised = result.model_dump_json()
+                await cache_set(cache_key, serialised, ttl=settings.CACHE_TTL)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Cache write error (%s): %s", cache_key, exc)
+
+        return result
+
+
+# ── Singleton ─────────────────────────────────────────────────────────────────
 
 
 _orchestrator: InsightOrchestrator | None = None

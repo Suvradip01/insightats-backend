@@ -47,6 +47,10 @@ def verify_clerk_jwt(token: str) -> dict:
             "algorithms": ["RS256"],
             "issuer": settings.CLERK_ISSUER,
             "options": decode_options,
+            # 5-minute leeway handles clock skew between server and Clerk's
+            # auth servers, and covers the case where a token is near-expiry
+            # when a large batch upload begins.
+            "leeway": 300,
         }
         if settings.CLERK_AUDIENCE:
             kwargs["audience"] = settings.CLERK_AUDIENCE

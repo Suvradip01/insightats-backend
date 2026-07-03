@@ -1,4 +1,6 @@
 fastapi==0.115.5
+redis[hiredis]>=5.0.8
+python-dotenv>=1.0.1
 uvicorn[standard]==0.32.0
 transformers==4.46.3
 safetensors==0.4.5
