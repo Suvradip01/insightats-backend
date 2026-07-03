@@ -32,10 +32,12 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from app.core.config import settings
+from app.core.redis_client import cache_get, cache_set
 from app.schemas.batch import BatchAnalyzeResponse, RankedResumeResult
 from app.schemas.job import JobDescription
 from app.schemas.analyze import AnalyzeResponse
-from app.services.pipeline.orchestrator import get_orchestrator
+from app.services.pipeline.orchestrator import _make_cache_key, get_orchestrator
 from app.services.recruiter.clerk_jwt import _looks_like_jwt, verify_clerk_jwt
 from app.services.recruiter.security import AuthPrincipal, hash_password, verify_password
 from app.services.recruiter.store import (
@@ -179,6 +181,13 @@ def _analyze_one(filename: str, content: bytes, job: JobDescription) -> tuple[st
     as a status="error" AnalyzeResponse so one bad resume does not abort the batch.
     """
     try:
+        try:
+            import torch
+            if torch.get_num_threads() > 1:
+                torch.set_num_threads(1)
+        except ImportError:
+            pass
+
         text = ResumeParser.extract_text(content, filename)
         result = get_orchestrator().analyze(text, job)
         return filename, result
@@ -234,27 +243,65 @@ async def batch_analyze(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid job_description file: {e}") from e
 
-    # ── Read all resume bytes up-front (async, fast) ──────────────────────
-    resume_payloads: list[tuple[str, bytes]] = []
+    # ── Read all resume bytes up-front and check Redis cache ──────────────
+    parsed_resumes: list[tuple[str, bytes, str, str]] = []
     for rf in resumes:
         content = await rf.read()
         fname = rf.filename or "resume.bin"
-        resume_payloads.append((fname, content))
+        try:
+            text = ResumeParser.extract_text(content, fname)
+            cache_key = _make_cache_key(text, jd_text)
+            parsed_resumes.append((fname, content, text, cache_key))
+        except Exception:
+            parsed_resumes.append((fname, content, "", ""))
+
+    cached_results: dict[str, AnalyzeResponse] = {}
+    for fname, content, text, ck in parsed_resumes:
+        if ck:
+            try:
+                cached_json = await cache_get(ck)
+                if cached_json:
+                    cached_results[fname] = AnalyzeResponse.model_validate_json(cached_json)
+                    logger.debug("Batch cache HIT: %s", fname)
+            except Exception as e:
+                logger.warning("Redis read error in batch for %s: %s", fname, e)
+
+    misses: list[tuple[str, bytes]] = []
+    analyzed: list[tuple[str, AnalyzeResponse]] = []
+
+    for fname, content, text, ck in parsed_resumes:
+        if fname in cached_results:
+            analyzed.append((fname, cached_results[fname]))
+        else:
+            misses.append((fname, content))
 
     logger.info(
-        "Batch analyze: %d resumes for %s (workers=%d)",
-        len(resume_payloads), recruiter.company, MAX_BATCH_WORKERS,
+        "Batch analyze: %d resumes for %s, %d cache hits, %d cache misses (workers=%d)",
+        len(parsed_resumes), recruiter.company, len(cached_results), len(misses), MAX_BATCH_WORKERS,
     )
 
-    # ── Concurrent analysis in thread pool ────────────────────────────────
-    loop = asyncio.get_event_loop()
-    executor = _get_executor()
+    # ── Concurrent analysis of misses in thread pool ──────────────────────
+    if misses:
+        loop = asyncio.get_event_loop()
+        executor = _get_executor()
 
-    tasks = [
-        loop.run_in_executor(executor, _analyze_one, fname, content, job)
-        for fname, content in resume_payloads
-    ]
-    analyzed: list[tuple[str, AnalyzeResponse]] = list(await asyncio.gather(*tasks))
+        tasks = [
+            loop.run_in_executor(executor, _analyze_one, fname, content, job)
+            for fname, content in misses
+        ]
+        miss_results: list[tuple[str, AnalyzeResponse]] = list(await asyncio.gather(*tasks))
+        
+        for fname, result in miss_results:
+            analyzed.append((fname, result))
+            if result.status == "success":
+                # Find cache key
+                ck = next((item[3] for item in parsed_resumes if item[0] == fname), None)
+                if ck:
+                    try:
+                        serialised = result.model_dump_json()
+                        await cache_set(ck, serialised, ttl=settings.CACHE_TTL)
+                    except Exception as e:
+                        logger.debug("Cache write error in batch (%s): %s", fname, e)
 
     # ── Rank by score descending ──────────────────────────────────────────
     analyzed.sort(key=lambda t: int(getattr(t[1], "score", 0) or 0), reverse=True)
